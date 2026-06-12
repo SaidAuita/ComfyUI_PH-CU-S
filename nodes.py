@@ -15,7 +15,7 @@ from nodes import SaveImage
 PLUGIN_ROOT  = Path(os.path.dirname(os.path.abspath(__file__)))
 EXCHANGE_DIR = PLUGIN_ROOT / "exchange"
 
-__version__ = "3.60.16"
+__version__ = "3.60.17"
 print(f"[PH-CU-S] Custom node version {__version__} loaded.")
 
 

@@ -1,0 +1,376 @@
+import os
+import random
+import time
+import hashlib
+import urllib.request
+from pathlib import Path
+from io import BytesIO
+
+import torch
+import numpy as np
+from PIL import Image, ImageOps
+import folder_paths
+from nodes import SaveImage
+
+PLUGIN_ROOT  = Path(os.path.dirname(os.path.abspath(__file__)))
+EXCHANGE_DIR = PLUGIN_ROOT / "exchange"
+
+__version__ = "3.60.16"
+print(f"[PH-CU-S] Custom node version {__version__} loaded.")
+
+
+
+class FileWatcher:
+    """Tracks file content changes via MD5 to trigger node re-execution."""
+    _cache: dict[str, str] = {}
+
+    @classmethod
+    def has_changed(cls, path: str) -> bool:
+        try:
+            with open(path, "rb") as fh:
+                digest = hashlib.md5(fh.read()).hexdigest()
+        except OSError:
+            return True
+        prev = cls._cache.get(path)
+        cls._cache[path] = digest
+        return prev != digest
+
+
+def _read_text(path: Path, fallback: str = "") -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return fallback
+
+
+def _read_image(path: Path) -> Image.Image:
+    try:
+        raw = path.read_bytes()
+        img = Image.open(BytesIO(raw))
+        img.verify()
+        return Image.open(BytesIO(raw))
+    except Exception as exc:
+        print(f"[PH-CU-S] Cannot read {path.name}: {exc}")
+        return Image.new("RGB", (256, 256), 0)
+
+
+def _image_to_tensor(img: Image.Image):
+    arr = np.array(img.convert("RGB"), dtype=np.float32) / 255.0
+    return torch.from_numpy(arr)[None]
+
+
+def _mask_to_tensor(img: Image.Image):
+    img = ImageOps.exif_transpose(img)
+    if "A" in img.getbands():
+        bg = Image.new("RGBA", img.size, "BLACK")
+        bg.paste(img, mask=img)
+        grey = bg.convert("L")
+    else:
+        grey = img.convert("L")
+    arr = np.array(grey, dtype=np.float32) / 255.0
+    arr[arr <= 1.0 / 255.0] = 0.0
+    return torch.from_numpy(arr)
+
+
+def _load_extra_image(idx: int, client_id: str = "") -> torch.Tensor:
+    suffix = f"_{client_id}" if client_id else ""
+    # 1. Search directly in EXCHANGE_DIR first (from 3.60.14)
+    direct_path = EXCHANGE_DIR / f"extra_img_{idx}{suffix}.png"
+    if direct_path.exists():
+        print(f"[PH-CU-S] Images slot {idx}: found direct → {direct_path}")
+        return _image_to_tensor(_read_image(direct_path))
+    elif client_id:
+        direct_path_fallback = EXCHANGE_DIR / f"extra_img_{idx}.png"
+        if direct_path_fallback.exists():
+            print(f"[PH-CU-S] Images slot {idx}: found fallback direct → {direct_path_fallback}")
+            return _image_to_tensor(_read_image(direct_path_fallback))
+
+    # 2. Fallback to txt file
+    txt_path = EXCHANGE_DIR / f"extra_img_{idx}{suffix}.txt"
+    if not txt_path.exists() and client_id:
+        txt_path = EXCHANGE_DIR / f"extra_img_{idx}.txt"
+    raw_path = _read_text(txt_path, "").strip()
+    if not raw_path:
+        print(f"[PH-CU-S] Images slot {idx}: empty")
+        return torch.zeros(1, 1, 1, 3)
+
+    # 3. Try raw path as absolute path
+    img_path = Path(raw_path)
+    if img_path.exists():
+        print(f"[PH-CU-S] Images slot {idx}: found absolute → {img_path}")
+        return _image_to_tensor(_read_image(img_path))
+
+    # 4. Resolve path relative to exchange folder (from 3.60.11)
+    # If absolute path does not match (macOS/Windows virtual environments mismatch)
+    import os
+    base_name = os.path.basename(raw_path.replace("\\", "/"))
+    exchange_fallback = EXCHANGE_DIR / base_name
+    if exchange_fallback.exists():
+        print(f"[PH-CU-S] Images slot {idx}: resolved via exchange → {exchange_fallback}")
+        return _image_to_tensor(_read_image(exchange_fallback))
+
+    # 5. Resolve relative paths if ComfyUI is launched via bat-files (from 3.60.13)
+    # The relative path from the txt might contain "ComfyUI/" prefix or not.
+    # Try resolving relative to ComfyUI root directory.
+    # PLUGIN_ROOT is ComfyUI/custom_nodes/ComfyUI_PH-CU-S.
+    # So ComfyUI root is PLUGIN_ROOT.parent.parent
+    comfy_root = PLUGIN_ROOT.parent.parent
+    
+    # Strip "ComfyUI/" prefix from raw_path if present, because we are already relative to comfy_root
+    normalized_rel = raw_path.replace("\\", "/")
+    if normalized_rel.startswith("ComfyUI/"):
+        normalized_rel = normalized_rel[len("ComfyUI/"):]
+    elif normalized_rel.startswith("/ComfyUI/"):
+        normalized_rel = normalized_rel[len("/ComfyUI/"):]
+        
+    rel_path = comfy_root / normalized_rel
+    if rel_path.exists():
+        print(f"[PH-CU-S] Images slot {idx}: resolved relative to ComfyUI root → {rel_path}")
+        return _image_to_tensor(_read_image(rel_path))
+        
+    # Also try resolving relative to PLUGIN_ROOT's parent (custom_nodes) or PLUGIN_ROOT itself
+    if "custom_nodes/" in normalized_rel:
+        custom_node_rel = normalized_rel.split("custom_nodes/", 1)[1]
+        resolved_custom = PLUGIN_ROOT / custom_node_rel
+        if resolved_custom.exists():
+            print(f"[PH-CU-S] Images slot {idx}: resolved relative to custom_nodes → {resolved_custom}")
+            return _image_to_tensor(_read_image(resolved_custom))
+
+    print(f"[PH-CU-S] Images slot {idx}: not found → {raw_path}")
+    return torch.zeros(1, 1, 1, 3)
+
+
+class PHCUSInput:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "client_id": ("STRING", {"default": ""})
+            }
+        }
+
+    RETURN_TYPES  = ("IMAGE", "MASK", "STRING", "STRING", "INT", "INT", "INT", "INT", "FLOAT",
+                     "IMAGE", "IMAGE", "IMAGE", "INT")
+    RETURN_NAMES  = ("Canvas", "Mask", "Prompt", "Negative Prompt",
+                     "Width", "Height", "Seed", "Custom Step", "CFG",
+                     "Image 1", "Image 2", "Image 3", "Zoom")
+    FUNCTION  = "execute"
+    CATEGORY  = "PH-CU-S"
+
+    def execute(self, client_id=""):
+        ex = EXCHANGE_DIR
+        suffix = f"_{client_id}" if client_id else ""
+
+        canvas_path = ex / f"canvas{suffix}.png"
+        if not canvas_path.exists() and client_id:
+            canvas_path = ex / "canvas.png"
+            
+        for _ in range(5):
+            if canvas_path.exists():
+                break
+            time.sleep(0.5)
+
+        canvas_img = _read_image(canvas_path)
+        w, h = canvas_img.size
+        canvas_t = _image_to_tensor(canvas_img)
+        
+        mask_path = ex / f"mask{suffix}.png"
+        if not mask_path.exists() and client_id:
+            mask_path = ex / "mask.png"
+        mask_t   = _mask_to_tensor(_read_image(mask_path))
+
+        prompt_path = ex / f"prompt{suffix}.txt"
+        if not prompt_path.exists() and client_id:
+            prompt_path = ex / "prompt.txt"
+        prompt   = _read_text(prompt_path)
+        
+        neg_path = ex / f"negative{suffix}.txt"
+        if not neg_path.exists() and client_id:
+            neg_path = ex / "negative.txt"
+        negative = _read_text(neg_path)
+
+        seed_fixed_path = ex / f"seed_fixed{suffix}.txt"
+        if not seed_fixed_path.exists() and client_id:
+            seed_fixed_path = ex / "seed_fixed.txt"
+        seed_fixed = int(_read_text(seed_fixed_path, "0"))
+        
+        seed_in_path = ex / f"seed_in{suffix}.txt"
+        if not seed_in_path.exists() and client_id:
+            seed_in_path = ex / "seed_in.txt"
+        seed_val   = int(_read_text(seed_in_path, "0"))
+
+        if seed_fixed == 0:
+            seed_val = random.randint(0, 2**32 - 1)
+            print(f"[PH-CU-S] Random seed: {seed_val}")
+        else:
+            print(f"[PH-CU-S] Fixed seed: {seed_val}")
+
+        step_path = ex / f"step{suffix}.txt"
+        if not step_path.exists() and client_id:
+            step_path = ex / "step.txt"
+        custom_step = int(_read_text(step_path, "0"))
+        
+        cfg_path = ex / f"cfg{suffix}.txt"
+        if not cfg_path.exists() and client_id:
+            cfg_path = ex / "cfg.txt"
+        cfg_val     = float(_read_text(cfg_path, "1.0"))
+        print(f"[PH-CU-S] Step={custom_step}  CFG={cfg_val}")
+
+        zoom_path = ex / f"zoom_resolution{suffix}.txt"
+        if not zoom_path.exists() and client_id:
+            zoom_path = ex / "zoom_resolution.txt"
+        zoom_res = int(_read_text(zoom_path, "0"))
+        print(f"[PH-CU-S] Zoom={zoom_res}")
+
+        return (canvas_t, mask_t.unsqueeze(0), prompt, negative,
+                w, h, seed_val, custom_step, cfg_val,
+                _load_extra_image(1, client_id), _load_extra_image(2, client_id), _load_extra_image(3, client_id),
+                zoom_res)
+
+    @classmethod
+    def IS_CHANGED(cls, client_id=""):
+        suffix = f"_{client_id}" if client_id else ""
+        
+        def check_file(name):
+            p = EXCHANGE_DIR / f"{name}{suffix}.txt"
+            if not p.exists() and client_id:
+                p = EXCHANGE_DIR / f"{name}.txt"
+            return str(p)
+            
+        def check_img(name):
+            p = EXCHANGE_DIR / f"{name}{suffix}.png"
+            if not p.exists() and client_id:
+                p = EXCHANGE_DIR / f"{name}.png"
+            return str(p)
+
+        changed = (
+            FileWatcher.has_changed(check_img("canvas")) or
+            FileWatcher.has_changed(check_img("mask")) or
+            FileWatcher.has_changed(check_file("prompt")) or
+            FileWatcher.has_changed(check_file("negative")) or
+            FileWatcher.has_changed(check_file("seed_in")) or
+            FileWatcher.has_changed(check_file("seed_fixed")) or
+            FileWatcher.has_changed(check_file("step")) or
+            FileWatcher.has_changed(check_file("cfg")) or
+            any(FileWatcher.has_changed(check_file(f"extra_img_{i}")) for i in range(1, 4)) or
+            FileWatcher.has_changed(check_file("zoom_resolution"))
+        )
+        return float("NaN") if changed else 0
+
+
+class PHCUSSaveSeed:
+    """Writes the resolved seed to seed_result.txt and passes it downstream."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "seed": ("INT", {"default": 0, "min": 0, "max": 2**32 - 1}),
+                "client_id": ("STRING", {"default": ""})
+            }
+        }
+
+    RETURN_TYPES = ("INT",)
+    RETURN_NAMES = ("seed",)
+    FUNCTION     = "execute"
+    CATEGORY     = "PH-CU-S"
+    OUTPUT_NODE  = True
+
+    def execute(self, seed: int, client_id=""):
+        suffix = f"_{client_id}" if client_id else ""
+        dest = EXCHANGE_DIR / f"seed_result{suffix}.txt"
+        try:
+            dest.write_text(str(seed), encoding="utf-8")
+            print(f"[PH-CU-S] seed_result{suffix}.txt ← {seed}")
+        except OSError as exc:
+            print(f"[PH-CU-S] Cannot write seed_result.txt: {exc}")
+        return (seed,)
+
+
+class PHCUSOutput(SaveImage):
+
+    def __init__(self):
+        self.output_dir     = folder_paths.get_temp_directory()
+        self.type           = "temp"
+        self.prefix_append  = "_phcus_"
+        self.compress_level = 4
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "output_image": ("IMAGE",),
+                "width": ("INT", {"default": 0, "min": 0}),
+                "height": ("INT", {"default": 0, "min": 0}),
+                "client_id": ("STRING", {"default": ""})
+            },
+            "hidden":   {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
+        }
+
+    FUNCTION    = "execute"
+    CATEGORY    = "PH-CU-S"
+    OUTPUT_NODE = True
+
+    def _signal_ready(self, filename: str, client_id=""):
+        try:
+            from server import PromptServer
+            port = PromptServer.instance.port
+            url  = f"http://127.0.0.1:{port}/phcus/renderdone?filename={filename}&client_id={client_id}"
+            with urllib.request.urlopen(urllib.request.Request(url)) as resp:
+                return resp.read().decode()
+        except Exception as exc:
+            print(f"[PH-CU-S] Signal failed: {exc}")
+
+    def execute(self, output_image: torch.Tensor,
+                width: int = 0, height: int = 0, client_id="",
+                filename_prefix="PF_OUT", prompt=None, extra_pnginfo=None):
+        width = int(width or 0)
+        height = int(height or 0)
+        suffix = f"_{client_id}" if client_id else ""
+        width_path = EXCHANGE_DIR / f"output_width{suffix}.txt"
+        height_path = EXCHANGE_DIR / f"output_height{suffix}.txt"
+
+        if width > 0 and height > 0:
+            try:
+                width_path.write_text(str(width), encoding="utf-8")
+                height_path.write_text(str(height), encoding="utf-8")
+                print(f"[PH-CU-S] output_width{suffix}.txt ← {width}")
+                print(f"[PH-CU-S] output_height{suffix}.txt ← {height}")
+            except OSError as exc:
+                print(f"[PH-CU-S] Cannot write output dimensions: {exc}")
+        else:
+            for path in (width_path, height_path):
+                if path.exists():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+
+        result   = self.save_images(output_image, filename_prefix, prompt, extra_pnginfo)
+        filename = result["ui"]["images"][0]["filename"]
+        
+        # Copy the result image to exchange folder for the plugin to read
+        temp_path = Path(self.output_dir) / filename
+        result_path = EXCHANGE_DIR / f"result{suffix}.png"
+        try:
+            import shutil
+            shutil.copy2(temp_path, result_path)
+            print(f"[PH-CU-S] result{suffix}.png ← {filename} ({width}x{height})")
+        except Exception as exc:
+            print(f"[PH-CU-S] Cannot copy result to exchange: {exc}")
+        
+        self._signal_ready(filename, client_id)
+        return result
+
+
+NODE_CLASS_MAPPINGS = {
+    "PHCUSInput":    PHCUSInput,
+    "PHCUSOutput":   PHCUSOutput,
+    "PHCUSSaveSeed": PHCUSSaveSeed,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "PHCUSInput":    "🎨 PH-CU-S Input",
+    "PHCUSOutput":   "🎨 PH-CU-S Output",
+    "PHCUSSaveSeed": "🎨 PH-CU-S Save Seed",
+}

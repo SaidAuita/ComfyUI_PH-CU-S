@@ -1,0 +1,10 @@
+[project]
+name = "ComfyUI_PH-CU-S"
+description = "Photoshop ↔ ComfyUI bridge for real-time image generation inside Photoshop."
+version = "2.0.0"
+license = "MIT"
+
+[tool.comfy]
+PublisherId = "ph-cu-s"
+DisplayName = "PH-CU-S"
+Icon = ""

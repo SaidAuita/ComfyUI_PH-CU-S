@@ -1,5 +1,7 @@
 # PH-CU-S for ComfyUI
 
+**Official Website & Photoshop Plugin:** [ph-cu-s.com](https://www.ph-cu-s.com)
+
 A set of nodes for integrating the Photoshop `PH-CU-S` plugin with `ComfyUI`.
 Supported since version 2025.
 

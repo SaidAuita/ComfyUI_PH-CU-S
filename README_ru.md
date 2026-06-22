@@ -1,5 +1,7 @@
 # PH-CU-S для ComfyUI
 
+**Официальный сайт и плагин для Photoshop:** [ph-cu-s.com](https://www.ph-cu-s.com)
+
 Набор нод для интеграции плагина Photoshop `PH-CU-S` с `ComfyUI`.
 Поддержка с версии 2025 года.
 

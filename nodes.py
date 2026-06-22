@@ -15,9 +15,18 @@ from nodes import SaveImage
 PLUGIN_ROOT  = Path(os.path.dirname(os.path.abspath(__file__)))
 EXCHANGE_DIR = PLUGIN_ROOT / "exchange"
 
-__version__ = "3.60.17"
+__version__ = "3.60.48"
 print(f"[PH-CU-S] Custom node version {__version__} loaded.")
 
+
+
+def log_debug(msg):
+    try:
+        log_path = EXCHANGE_DIR / "debug_nodes.log"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception as e:
+        print(f"Error writing to debug log: {e}")
 
 
 class FileWatcher:
@@ -30,10 +39,13 @@ class FileWatcher:
             with open(path, "rb") as fh:
                 digest = hashlib.md5(fh.read()).hexdigest()
         except OSError:
+            log_debug(f"has_changed OSError for {os.path.basename(path)}")
             return True
         prev = cls._cache.get(path)
         cls._cache[path] = digest
-        return prev != digest
+        changed = prev != digest
+        log_debug(f"has_changed {os.path.basename(path)}: prev={prev[:8] if prev else 'None'} curr={digest[:8]} changed={changed}")
+        return changed
 
 
 def _read_text(path: Path, fallback: str = "") -> str:
@@ -158,6 +170,7 @@ class PHCUSInput:
     CATEGORY  = "PH-CU-S"
 
     def execute(self, client_id=""):
+        log_debug(f"execute() called with client_id={client_id!r}")
         ex = EXCHANGE_DIR
         suffix = f"_{client_id}" if client_id else ""
 
@@ -183,11 +196,13 @@ class PHCUSInput:
         if not prompt_path.exists() and client_id:
             prompt_path = ex / "prompt.txt"
         prompt   = _read_text(prompt_path)
+        log_debug(f"execute() prompt path: {prompt_path.name}, content: {prompt!r}")
         
         neg_path = ex / f"negative{suffix}.txt"
         if not neg_path.exists() and client_id:
             neg_path = ex / "negative.txt"
         negative = _read_text(neg_path)
+        log_debug(f"execute() negative path: {neg_path.name}, content: {negative!r}")
 
         seed_fixed_path = ex / f"seed_fixed{suffix}.txt"
         if not seed_fixed_path.exists() and client_id:
@@ -204,6 +219,7 @@ class PHCUSInput:
             print(f"[PH-CU-S] Random seed: {seed_val}")
         else:
             print(f"[PH-CU-S] Fixed seed: {seed_val}")
+        log_debug(f"execute() seed_fixed={seed_fixed}, seed_val={seed_val}")
 
         step_path = ex / f"step{suffix}.txt"
         if not step_path.exists() and client_id:
@@ -229,6 +245,7 @@ class PHCUSInput:
 
     @classmethod
     def IS_CHANGED(cls, client_id=""):
+        log_debug(f"IS_CHANGED() called with client_id={client_id!r}")
         suffix = f"_{client_id}" if client_id else ""
         
         def check_file(name):
@@ -243,19 +260,23 @@ class PHCUSInput:
                 p = EXCHANGE_DIR / f"{name}.png"
             return str(p)
 
-        changed = (
-            FileWatcher.has_changed(check_img("canvas")) or
-            FileWatcher.has_changed(check_img("mask")) or
-            FileWatcher.has_changed(check_file("prompt")) or
-            FileWatcher.has_changed(check_file("negative")) or
-            FileWatcher.has_changed(check_file("seed_in")) or
-            FileWatcher.has_changed(check_file("seed_fixed")) or
-            FileWatcher.has_changed(check_file("step")) or
-            FileWatcher.has_changed(check_file("cfg")) or
-            any(FileWatcher.has_changed(check_file(f"extra_img_{i}")) for i in range(1, 4)) or
-            FileWatcher.has_changed(check_file("zoom_resolution"))
-        )
-        return float("NaN") if changed else 0
+        # Update all caches to avoid stale checks in case we need them,
+        # but always return NaN to force ComfyUI to re-execute this node
+        # so that it reads fresh values for every prompt queue run.
+        FileWatcher.has_changed(check_img("canvas"))
+        FileWatcher.has_changed(check_img("mask"))
+        FileWatcher.has_changed(check_file("prompt"))
+        FileWatcher.has_changed(check_file("negative"))
+        FileWatcher.has_changed(check_file("seed_in"))
+        FileWatcher.has_changed(check_file("seed_fixed"))
+        FileWatcher.has_changed(check_file("step"))
+        FileWatcher.has_changed(check_file("cfg"))
+        for i in range(1, 4):
+            FileWatcher.has_changed(check_file(f"extra_img_{i}"))
+        FileWatcher.has_changed(check_file("zoom_resolution"))
+
+        log_debug("IS_CHANGED() returning NaN (always execute)")
+        return float("NaN")
 
 
 class PHCUSSaveSeed:

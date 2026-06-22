@@ -91,19 +91,30 @@ Sample final images:
 
 ## Short description of the PH-CU-S plugin
 
-- Allows using ComfyUI as an image generation engine inside the Photoshop workflow.
-- Supports masking, seed, CFG, and step control.
-- Minimizes manual file exchange: the plugin and ComfyUI synchronize data automatically.
-- Enables editing full-size high-resolution files by processing only the active region.
-- Displays a default warning for exceeding 4 megapixels, which can be ignored.
-- Aligns selections to Qwen and Flux 2 standard multiples of 112 and 64.
-- Saves 6 presets for prompt, negative prompt, description, and SEED.
-- If you need a re-generation with more steps using the same SEED, the seed can be fixed and custom STEP and CFG can be applied.
-- Can be configured to use a custom URL for connecting to ComfyUI.
-- Can set up ComfyUI on 1 computer (with good GPU and RAM) and connect to it over the local network from other computers, including tested with MAC (emulation in VMware, without video accelerator) / PC with integrated graphics. Detailed setup instructions and files are attached.
-- All settings are preserved for the next Photoshop launch.
-- Tested on a 3060 with 6 GB VRAM and 32 GB RAM. The Flux 2 Klein workflow works well.
-- There are workflows for Qwen Edit 2511 and Flux 2 for more complex tasks if your hardware supports larger models. The Qwen Edit 2511 workflow was tested on a 3080Ti with 64 GB RAM. Flux2.dev was tested on a 3090 with 128 GB RAM.
+PH-CU-S is an advanced UXP plugin for Adobe Photoshop that integrates ComfyUI directly into your Photoshop workflow. It allows you to run complex AI generation, inpainting, and outpainting tasks without leaving the canvas.
+
+### Key Features & Capabilities:
+- **Direct Photoshop Integration:** Work with familiar tools like layers, selections, and masks. The plugin automatically syncs the canvas, active selection, parameters, and generated outputs.
+- **30 Prompt Slots (5 Sets x 6 Slots):** Store and organize up to 30 prompt configurations across 5 color-coded tabs.
+  - Tab names can show compact labels (`SHOW_PROMPT_SET_NAMES` in `config.txt`).
+  - Colors are fully customizable and can be associated with names (e.g., `#ffb0b0 - Pink` in `config.txt`).
+- **Advanced Import & Export:**
+  - **`6▼` and `30▼` Buttons:** Fast load prompts from a `.txt` file into the active set or sequentially across all 30 slots. Supports negative prompts (lines starting with `N:`) and slot descriptions (lines starting with `D:`). Lines starting with `#` are treated as comments and skipped.
+  - **`30▲` Button:** Export all prompt configurations into a cleanly formatted text file.
+- **AUTO & Loop (`∞`) Modes:**
+  - **AUTO Mode:** Batch generate sequentially through slots 1–6 (or a custom count starting from the selected slot).
+  - **Loop Mode (`∞`):** Enables seamless continuation of AUTO generation into the next color set when slot 6 is passed.
+- **Smart Snap to Grid:** Automatically rounds selection sizes to grid multiples required by models (Flux x64, Qwen x112, Personal grid x8) to optimize generation quality. Automatically handles context padding on export when using brush selections.
+- **Subpixel Alignment Safety:** Prevents subpixel shifts and alignment issues by temporarily clearing active Photoshop selections when placing generated images, followed by precise programmatic scaling and positioning.
+- **Unified "Crop & Uncrop" Block:** A single, responsive block for expanding (uncrop) or shrinking (crop) the document canvas in selected directions, featuring interactive unit switchers (Millimeters, Inches, Pixels) and local storage persistence.
+- **Local Network Support (PC / MAC):** Set up a high-performance ComfyUI server on one PC and connect multiple Photoshop clients (Windows & macOS) over a local network.
+  - Features pre-configured setup scripts (`start_25H2_v2.bat` / `stop_25H2_v2.bat`) for easy sharing.
+  - Direct local loading (`file://` URLs) bypasses caching and network delays on remote clients.
+- **High-Resolution Editing:** Edit full-size high-res files by processing only the active region. Includes MAX_IMAGE_MP warnings (default 4MP) with direct options to downscale to 2/3/4 MP before sending.
+- **Multi-language Interface:** Full localization support in 8 languages: English, Spanish, Japanese, German, Chinese, Portuguese, French, and Russian.
+- **Robust License Backup:** Local license state backup (`~/.ph-cu-s/.license_state`) that bypasses UXP Node.js sandbox limitations on Windows and macOS.
+- **Performance Optimized:** Tested and works great on standard consumer hardware (e.g., RTX 3060 with 6GB VRAM for Flux 2 Klein). Workflows for heavy models like Qwen Image Edit 2511 and Flux 2 Dev are fully supported for high-end systems.
+
 
 ## Screenshots
 

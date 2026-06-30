@@ -15,13 +15,24 @@ from nodes import SaveImage
 PLUGIN_ROOT  = Path(os.path.dirname(os.path.abspath(__file__)))
 EXCHANGE_DIR = PLUGIN_ROOT / "exchange"
 
-__version__ = "3.60.48"
+__version__ = "3.60.53"
 print(f"[PH-CU-S] Custom node version {__version__} loaded.")
 
 
 
 def log_debug(msg):
     try:
+        enabled = False
+        for p in EXCHANGE_DIR.glob("debug_nodes*.txt"):
+            try:
+                if p.read_text(encoding="utf-8").strip().lower() == "true":
+                    enabled = True
+                    break
+            except Exception:
+                pass
+        if not enabled:
+            return
+
         log_path = EXCHANGE_DIR / "debug_nodes.log"
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")

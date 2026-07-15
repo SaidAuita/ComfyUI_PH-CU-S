@@ -15,24 +15,13 @@ from nodes import SaveImage
 PLUGIN_ROOT  = Path(os.path.dirname(os.path.abspath(__file__)))
 EXCHANGE_DIR = PLUGIN_ROOT / "exchange"
 
-__version__ = "3.60.53"
+__version__ = "3.61.00"
 print(f"[PH-CU-S] Custom node version {__version__} loaded.")
 
 
 
 def log_debug(msg):
     try:
-        enabled = False
-        for p in EXCHANGE_DIR.glob("debug_nodes*.txt"):
-            try:
-                if p.read_text(encoding="utf-8").strip().lower() == "true":
-                    enabled = True
-                    break
-            except Exception:
-                pass
-        if not enabled:
-            return
-
         log_path = EXCHANGE_DIR / "debug_nodes.log"
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
@@ -332,8 +321,6 @@ class PHCUSOutput(SaveImage):
         return {
             "required": {
                 "output_image": ("IMAGE",),
-                "width": ("INT", {"default": 0, "min": 0}),
-                "height": ("INT", {"default": 0, "min": 0}),
                 "client_id": ("STRING", {"default": ""})
             },
             "hidden":   {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
@@ -353,11 +340,10 @@ class PHCUSOutput(SaveImage):
         except Exception as exc:
             print(f"[PH-CU-S] Signal failed: {exc}")
 
-    def execute(self, output_image: torch.Tensor,
-                width: int = 0, height: int = 0, client_id="",
+    def execute(self, output_image: torch.Tensor, client_id="",
                 filename_prefix="PF_OUT", prompt=None, extra_pnginfo=None):
-        width = int(width or 0)
-        height = int(height or 0)
+        height = int(output_image.shape[1])
+        width = int(output_image.shape[2])
         suffix = f"_{client_id}" if client_id else ""
         width_path = EXCHANGE_DIR / f"output_width{suffix}.txt"
         height_path = EXCHANGE_DIR / f"output_height{suffix}.txt"
@@ -381,8 +367,13 @@ class PHCUSOutput(SaveImage):
         result   = self.save_images(output_image, filename_prefix, prompt, extra_pnginfo)
         filename = result["ui"]["images"][0]["filename"]
         
+        log_debug(f"PHCUSOutput.execute: filename={filename}")
+        log_debug(f"PHCUSOutput.execute: self.output_dir={self.output_dir}")
+
         # Copy the result image to exchange folder for the plugin to read
         temp_path = Path(self.output_dir) / filename
+        log_debug(f"PHCUSOutput.execute: temp_path={temp_path} (exists={temp_path.exists()})")
+
         result_path = EXCHANGE_DIR / f"result{suffix}.png"
         try:
             import shutil
@@ -390,7 +381,111 @@ class PHCUSOutput(SaveImage):
             print(f"[PH-CU-S] result{suffix}.png ← {filename} ({width}x{height})")
         except Exception as exc:
             print(f"[PH-CU-S] Cannot copy result to exchange: {exc}")
-        
+
+        # --- Save copy to disk based on output settings ---
+        try:
+            def read_param(name, default=""):
+                p_path = EXCHANGE_DIR / f"{name}{suffix}.txt"
+                if p_path.exists():
+                    try:
+                        return p_path.read_text(encoding="utf-8").strip()
+                    except Exception:
+                        pass
+                p_path_nosuf = EXCHANGE_DIR / f"{name}.txt"
+                if p_path_nosuf.exists():
+                    try:
+                        return p_path_nosuf.read_text(encoding="utf-8").strip()
+                    except Exception:
+                        pass
+                return default
+
+            output_mode = read_param("output_mode", "photoshop").lower()
+            
+            # Determine base output dir
+            base_out_dir_str = read_param("output_dir", "")
+            log_debug(f"PHCUSOutput.execute: output_mode={output_mode}, base_out_dir_str={base_out_dir_str}")
+            if not base_out_dir_str:
+                base_out_dir = Path(folder_paths.get_output_directory())
+            else:
+                base_out_dir = Path(base_out_dir_str)
+            log_debug(f"PHCUSOutput.execute: base_out_dir={base_out_dir}")
+
+            if output_mode in ("folder", "all"):
+                output_folder_date = read_param("output_folder_date", "false").lower() == "true"
+                log_debug(f"PHCUSOutput.execute: output_folder_date={output_folder_date}")
+
+                # Clean up name to be a safe directory/file name
+                def make_safe(name):
+                    for char in r'<>:"/\|?*':
+                        name = name.replace(char, '-')
+                    return name.strip()
+
+                target_subfolder = ""
+                if output_folder_date:
+                    target_subfolder = time.strftime("%Y-%m-%d")
+
+                final_out_dir = base_out_dir
+                if target_subfolder:
+                    final_out_dir = final_out_dir / target_subfolder
+                log_debug(f"PHCUSOutput.execute: final_out_dir={final_out_dir}")
+
+                try:
+                    final_out_dir.mkdir(parents=True, exist_ok=True)
+                    log_debug(f"PHCUSOutput.execute: Created/verified final_out_dir={final_out_dir}")
+                except Exception as exc:
+                    log_debug(f"PHCUSOutput.execute: Cannot create output directory {final_out_dir}: {exc}")
+                    final_out_dir = base_out_dir
+
+
+
+                # Build filename
+                job_name = make_safe(read_param("job_name", "Workflow"))
+                slot_info = read_param("slot_info", "")
+                
+                seed_used = ""
+                seed_file = EXCHANGE_DIR / f"seed_result{suffix}.txt"
+                if seed_file.exists():
+                    try:
+                        seed_used = seed_file.read_text(encoding="utf-8").strip()
+                    except Exception:
+                        pass
+                if not seed_used:
+                    seed_used = read_param("seed_in", "")
+
+                slot_part = ""
+                if slot_info:
+                    slot_part = f" {slot_info.replace(':', '-')}"
+                seed_part = f" s-{seed_used}" if seed_used else ""
+                out_filename = f"{job_name}{slot_part}{seed_part}.png"
+
+                out_filename = make_safe(out_filename)
+                if not out_filename.lower().endswith(".png"):
+                    out_filename += ".png"
+
+                stem = Path(out_filename).stem
+                counter = 1
+                final_file_path = final_out_dir / out_filename
+                while final_file_path.exists():
+                    final_file_path = final_out_dir / f"{stem}_{counter}.png"
+                    counter += 1
+
+                log_debug(f"PHCUSOutput.execute: target file path={final_file_path}")
+                try:
+                    import shutil
+                    shutil.copy2(temp_path, final_file_path)
+                    log_debug(f"[PH-CU-S] Saved copy to disk: {final_file_path}")
+                except Exception as exc:
+                    log_debug(f"[PH-CU-S] Failed to save copy to disk: {exc}")
+            else:
+                # photoshop mode: write the base_out_dir to last_saved_folder file
+                last_saved_folder_file = EXCHANGE_DIR / f"last_saved_folder{suffix}.txt"
+                try:
+                    last_saved_folder_file.write_text(str(base_out_dir), encoding="utf-8")
+                except Exception as exc:
+                    pass
+        except Exception as exc:
+            print(f"[PH-CU-S] Error in output settings execution: {exc}")
+
         self._signal_ready(filename, client_id)
         return result
 
